@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+build/
+build_*/
+*.spec
+dist/WeeklyTodoBallData/
+data/todo.db-shm
+data/todo.db-wal
