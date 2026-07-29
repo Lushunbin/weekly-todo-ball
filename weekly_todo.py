@@ -4,7 +4,7 @@ import sys
 import tkinter as tk
 import calendar
 from datetime import date, datetime, timedelta
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 
 BG = "#F5F5F7"
@@ -29,6 +29,23 @@ def monday_for(day: date) -> date:
 
 def display_week(start: date) -> str:
     return f"{start:%Y年%m月%d日} — {(start + timedelta(days=6)):%m月%d日}"
+
+
+
+def ellipsize(text: str, font_spec, max_width: int) -> str:
+    """Return a visually tidy one-line title that fits the available width."""
+    display_font = tkfont.Font(font=font_spec)
+    if display_font.measure(text) <= max_width:
+        return text
+    suffix = "…"
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if display_font.measure(text[:middle] + suffix) <= max_width:
+            low = middle
+        else:
+            high = middle - 1
+    return (text[:low] + suffix) if low else suffix
 
 
 class TodoDatabase:
@@ -60,6 +77,12 @@ class TodoDatabase:
                 completed_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_todos_week ON todos(week_id);
+            CREATE TABLE IF NOT EXISTS carry_forwards (
+                source_week_id INTEGER NOT NULL REFERENCES weeks(id) ON DELETE CASCADE,
+                target_week_id INTEGER NOT NULL UNIQUE REFERENCES weeks(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (source_week_id, target_week_id)
+            );
             """
         )
         self.conn.commit()
@@ -68,10 +91,43 @@ class TodoDatabase:
         key = start.isoformat()
         row = self.conn.execute("SELECT id FROM weeks WHERE week_start=?", (key,)).fetchone()
         if row:
-            return int(row["id"])
+            week_id = int(row["id"])
+            self.carry_forward_if_needed(start, week_id)
+            return week_id
         cur = self.conn.execute("INSERT INTO weeks(week_start) VALUES (?)", (key,))
+        week_id = int(cur.lastrowid)
+        self.carry_forward_if_needed(start, week_id)
         self.conn.commit()
-        return int(cur.lastrowid)
+        return week_id
+
+    def carry_forward_if_needed(self, target_start: date, target_week_id: int):
+        """Copy only unfinished tasks from the immediately preceding week once."""
+        already_processed = self.conn.execute(
+            "SELECT 1 FROM carry_forwards WHERE target_week_id=?", (target_week_id,)
+        ).fetchone()
+        if already_processed:
+            return
+
+        previous_key = (target_start - timedelta(days=7)).isoformat()
+        previous_week = self.conn.execute(
+            "SELECT id FROM weeks WHERE week_start=?", (previous_key,)
+        ).fetchone()
+        if previous_week:
+            created_at = datetime.now().isoformat(timespec="seconds")
+            self.conn.execute(
+                """
+                INSERT INTO todos(week_id,title,completed,created_at)
+                SELECT ?, title, 0, ?
+                FROM todos
+                WHERE week_id=? AND completed=0
+                """,
+                (target_week_id, created_at, int(previous_week["id"])),
+            )
+            self.conn.execute(
+                "INSERT INTO carry_forwards(source_week_id,target_week_id,created_at) VALUES (?,?,?)",
+                (int(previous_week["id"]), target_week_id, created_at),
+            )
+            self.conn.commit()
 
     def items(self, start: date):
         week_id = self.ensure_week(start)
@@ -416,6 +472,34 @@ class CalendarPicker(tk.Toplevel):
         self.destroy()
 
 
+class FloatingTodoRow(tk.Frame):
+    """Compact floating-panel row with title truncation that uses an ellipsis."""
+
+    def __init__(self, master, item, on_toggle):
+        super().__init__(master, bg=CARD, height=42)
+        self.item = item
+        self.title_font = (FONT, 9)
+        self.pack_propagate(False)
+        self.columnconfigure(1, weight=1)
+        CircleCheck(self, item["completed"], lambda value: on_toggle(item["id"], value), bg=CARD, size=26).grid(
+            row=0, column=0, padx=(9, 8), pady=8
+        )
+        self.label = tk.Label(
+            self,
+            text=item["title"],
+            bg=CARD,
+            fg=MUTED if item["completed"] else INK,
+            anchor="w",
+            font=self.title_font,
+        )
+        self.label.grid(row=0, column=1, sticky="ew", pady=10, padx=(0, 8))
+        self.bind("<Configure>", self.fit_title)
+
+    def fit_title(self, event):
+        available = max(20, event.width - 54)
+        self.label.configure(text=ellipsize(self.item["title"], self.title_font, available))
+
+
 class FloatingBall(tk.Toplevel):
     """A draggable ball that expands only after a deliberate single click."""
 
@@ -571,12 +655,7 @@ class FloatingBall(tk.Toplevel):
             child.destroy()
         items = self.db.items(monday_for(date.today()))
         for item in items:
-            row = tk.Frame(self.items_frame, bg=CARD, height=42)
-            row.pack(fill="x", pady=(0, 5))
-            row.pack_propagate(False)
-            row.columnconfigure(1, weight=1)
-            CircleCheck(row, item["completed"], lambda value, item_id=item["id"]: self.set_float_done(item_id, value), bg=CARD, size=26).grid(row=0, column=0, padx=(9, 8), pady=8)
-            tk.Label(row, text=item["title"], bg=CARD, fg=MUTED if item["completed"] else INK, anchor="w", font=(FONT, 9)).grid(row=0, column=1, sticky="ew", pady=10)
+            FloatingTodoRow(self.items_frame, item, self.set_float_done).pack(fill="x", pady=(0, 5))
         if not items:
             tk.Label(self.items_frame, text="暂无待办", bg=BG, fg=MUTED, font=(FONT, 10)).pack(anchor="w", pady=10)
         self.footer.configure(text=f"未完成 {sum(1 for row in items if not row['completed'])} 项 · 数据保存在本机")
@@ -725,28 +804,27 @@ class WeeklyTodoApp(tk.Tk):
         self.refresh()
 
     def export_week(self):
-        items = self.db.items(self.week_start)
-        suggested_name = f"待办_{self.week_start:%Y%m%d}.txt"
+        items = [item for item in self.db.items(self.week_start) if item["completed"]]
+        suggested_name = f"已完成待办_{self.week_start:%Y%m%d}.txt"
         target = filedialog.asksaveasfilename(
             parent=self,
-            title="导出本周待办",
+            title="导出本周已完成待办",
             initialfile=suggested_name,
             defaultextension=".txt",
             filetypes=(("文本文件", "*.txt"), ("所有文件", "*.*")),
         )
         if not target:
             return
-        lines = [f"本周待办（{display_week(self.week_start)}）", ""]
+        lines = [f"本周已完成待办（{display_week(self.week_start)}）", ""]
         if items:
             for index, item in enumerate(items, start=1):
-                suffix = " [已完成]" if item["completed"] else ""
-                lines.append(f"{index}. {item['title']}{suffix}")
+                lines.append(f"{index}. {item['title']} [已完成]")
         else:
-            lines.append("本周暂无待办。")
+            lines.append("本周暂无已完成待办。")
         try:
             with open(target, "w", encoding="utf-8-sig", newline="\n") as output:
                 output.write("\n".join(lines))
-            messagebox.showinfo("导出完成", f"已导出 {len(items)} 项待办：\n{target}", parent=self)
+            messagebox.showinfo("导出完成", f"已导出 {len(items)} 项已完成待办：\n{target}", parent=self)
         except OSError as error:
             messagebox.showerror("导出失败", f"无法写入文件：\n{error}", parent=self)
 
