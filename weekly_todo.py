@@ -7,14 +7,18 @@ from datetime import date, datetime, timedelta
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 
-BG = "#F5F5F7"
+BG = "#F6F7FB"
 CARD = "#FFFFFF"
-INK = "#1D1D1F"
-MUTED = "#86868B"
-ACCENT = "#007AFF"
-ACCENT_LIGHT = "#EAF3FF"
-BORDER = "#E5E5EA"
+INK = "#20242C"
+MUTED = "#7B8495"
+ACCENT = "#0A84FF"
+ACCENT_DARK = "#0066CC"
+ACCENT_LIGHT = "#EAF4FF"
+BORDER = "#E7EAF0"
 ROW = "#FFFFFF"
+SUBTLE = "#F8FAFD"
+SUCCESS = "#34C759"
+FLOAT_TRANSPARENT = "#00FF00"
 FONT = "Microsoft YaHei UI"
 
 
@@ -473,70 +477,67 @@ class CalendarPicker(tk.Toplevel):
 
 
 class FloatingTodoRow(tk.Frame):
-    """Compact floating-panel row with title truncation that uses an ellipsis."""
+    """Compact status row for the floating task card."""
 
     def __init__(self, master, item, on_toggle):
-        super().__init__(master, bg=CARD, height=42)
+        super().__init__(master, bg=SUBTLE, height=48, highlightthickness=1, highlightbackground=BORDER)
         self.item = item
         self.title_font = (FONT, 9)
         self.pack_propagate(False)
         self.columnconfigure(1, weight=1)
-        CircleCheck(self, item["completed"], lambda value: on_toggle(item["id"], value), bg=CARD, size=26).grid(
-            row=0, column=0, padx=(9, 8), pady=8
+        CircleCheck(self, item["completed"], lambda value: on_toggle(item["id"], value), bg=SUBTLE, size=26).grid(
+            row=0, column=0, padx=(10, 8), pady=10
         )
-        self.label = tk.Label(
-            self,
-            text=item["title"],
-            bg=CARD,
-            fg=MUTED if item["completed"] else INK,
-            anchor="w",
-            font=self.title_font,
-        )
-        self.label.grid(row=0, column=1, sticky="ew", pady=10, padx=(0, 8))
+        self.label = tk.Label(self, text=item["title"], bg=SUBTLE, fg=MUTED if item["completed"] else INK,
+                              anchor="w", font=self.title_font)
+        self.label.grid(row=0, column=1, sticky="ew", pady=12, padx=(0, 8))
         self.bind("<Configure>", self.fit_title)
 
     def fit_title(self, event):
-        available = max(20, event.width - 54)
-        self.label.configure(text=ellipsize(self.item["title"], self.title_font, available))
+        self.label.configure(text=ellipsize(self.item["title"], self.title_font, max(20, event.width - 58)))
 
 
 class FloatingBall(tk.Toplevel):
-    """A draggable ball that expands only after a deliberate single click."""
+    """A draggable visual status ball with a stable, click-open task card."""
 
     def __init__(self, master, db: TodoDatabase, restore_callback, initial_position=None):
         super().__init__(master)
         self.db, self.restore_callback = db, restore_callback
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.configure(bg=ACCENT)
-        self.compact_size = 76
+        self.compact_size = 94
         self.expanded = False
         self.expanded_frame = None
         self.drag_start = None
         self.dragging = False
+        self.hovered = False
         self.single_click_id = None
         self.compact_position = initial_position
+        self.configure(bg=FLOAT_TRANSPARENT)
+        try:
+            self.wm_attributes("-transparentcolor", FLOAT_TRANSPARENT)
+        except tk.TclError:
+            pass
 
-        self.ball = tk.Canvas(self, width=self.compact_size, height=self.compact_size, bg=ACCENT, highlightthickness=0)
+        self.ball = tk.Canvas(self, width=self.compact_size, height=self.compact_size, bg=FLOAT_TRANSPARENT,
+                              highlightthickness=0, bd=0, cursor="hand2")
         self.ball.pack()
         self.ball.bind("<ButtonPress-1>", self.start_drag)
         self.ball.bind("<B1-Motion>", self.drag)
         self.ball.bind("<ButtonRelease-1>", self.end_drag)
         self.ball.bind("<Double-Button-1>", self.open_editor)
+        self.ball.bind("<Enter>", self.on_enter)
+        self.ball.bind("<Leave>", self.on_leave)
         self.position_compact()
-        self.refresh_ball()
-        self.monitor_id = self.after(180, self.monitor)
+        self.monitor_id = self.after(3000, self.monitor)
 
     def work_area(self):
-        # Keep the panel above the taskbar, while leaving a narrow safety margin.
         return self.winfo_screenwidth(), max(260, self.winfo_screenheight() - 48)
 
     def clamp_compact_position(self, x, y):
         width, height = self.work_area()
-        return (
-            max(8, min(int(x), max(8, width - self.compact_size - 8))),
-            max(8, min(int(y), max(8, height - self.compact_size - 8))),
-        )
+        return (max(8, min(int(x), max(8, width - self.compact_size - 8))),
+                max(8, min(int(y), max(8, height - self.compact_size - 8))))
 
     def position_compact(self):
         if self.compact_position is None:
@@ -555,6 +556,16 @@ class FloatingBall(tk.Toplevel):
                 pass
             self.single_click_id = None
 
+    def on_enter(self, _event=None):
+        if not self.expanded:
+            self.hovered = True
+            self.draw_ball()
+
+    def on_leave(self, _event=None):
+        if not self.expanded and not self.dragging:
+            self.hovered = False
+            self.draw_ball()
+
     def start_drag(self, event):
         self.cancel_single_click()
         self.dragging = False
@@ -564,10 +575,10 @@ class FloatingBall(tk.Toplevel):
         if not self.drag_start or self.expanded:
             return
         start_x, start_y, window_x, window_y = self.drag_start
-        delta_x, delta_y = event.x_root - start_x, event.y_root - start_y
-        if abs(delta_x) + abs(delta_y) >= 3:
+        dx, dy = event.x_root - start_x, event.y_root - start_y
+        if abs(dx) + abs(dy) >= 3:
             self.dragging = True
-        x, y = self.clamp_compact_position(window_x + delta_x, window_y + delta_y)
+        x, y = self.clamp_compact_position(window_x + dx, window_y + dy)
         self.geometry(f"+{x}+{y}")
 
     def end_drag(self, _event=None):
@@ -575,8 +586,9 @@ class FloatingBall(tk.Toplevel):
         if self.dragging:
             self.compact_position = self.clamp_compact_position(self.winfo_x(), self.winfo_y())
             self.dragging = False
+            self.hovered = False
+            self.draw_ball()
             return
-        # Delay the action just enough to distinguish one click from a double click.
         self.cancel_single_click()
         self.single_click_id = self.after(260, self.expand)
 
@@ -587,23 +599,47 @@ class FloatingBall(tk.Toplevel):
 
     def draw_ball(self):
         self.ball.delete("all")
-        self.ball.create_oval(5, 5, self.compact_size - 5, self.compact_size - 5, fill=ACCENT, outline="")
         items = self.db.items(monday_for(date.today()))
+        total = len(items)
         pending = sum(1 for row in items if not row["completed"])
-        text = "✓\n完成" if pending == 0 else f"{pending}\n待办"
-        self.ball.create_text(self.compact_size / 2, self.compact_size / 2, text=text, fill="white", font=(FONT, 10, "bold"))
+        done = total - pending
+        all_done = total > 0 and pending == 0
+        base = SUCCESS if all_done else ACCENT
+        rim = "#DDF7E4" if all_done else "#E7F2FF"
+        shadow = "#BCECCB" if all_done else ("#A7CEFA" if self.hovered else "#C8DDF4")
+        gloss = "#91E6A6" if all_done else "#65B3FF"
+
+        # A soft offset shadow, pale rim and glossy core avoid the old square background.
+        self.ball.create_oval(15, 18, 84, 87, fill=shadow, outline="")
+        self.ball.create_oval(7, 7, 87, 87, fill=rim, outline="")
+        self.ball.create_oval(10, 10, 84, 84, fill=base, outline="")
+        self.ball.create_arc(13, 13, 81, 81, start=125, extent=150, style=tk.ARC, outline=gloss, width=2)
+        self.ball.create_oval(21, 17, 52, 38, fill=gloss, outline="")
+        self.ball.create_oval(25, 20, 48, 34, fill="#FFFFFF", outline="")
+        self.ball.create_oval(27, 21, 47, 33, fill=gloss, outline="")
+
+        if all_done:
+            value, caption, value_font = "✓", "已完成", ("Segoe UI", 21, "bold")
+        elif total == 0:
+            value, caption, value_font = "—", "新建待办", ("Segoe UI", 17, "bold")
+        else:
+            value, caption, value_font = str(pending), "待办", ("Segoe UI", 18, "bold")
+        self.ball.create_text(47, 47, text=value, fill="white", font=value_font)
+        self.ball.create_text(47, 65, text=caption, fill="white", font=(FONT, 8, "bold"))
+        if total:
+            badge = f"{done}/{total}" if total < 100 else "99+"
+            self.ball.create_oval(62, 16, 82, 36, fill="white", outline="")
+            self.ball.create_text(72, 26, text=badge, fill=base, font=("Segoe UI", 7, "bold"))
 
     def expanded_geometry(self, width, height):
         screen_width, work_height = self.work_area()
         ball_x, ball_y = self.compact_position
-        # Keep the ball's corner fixed: left-bottom expands right-up; left-top right-down.
         expand_right = ball_x + self.compact_size / 2 <= screen_width / 2
         expand_down = ball_y + self.compact_size / 2 <= work_height / 2
         x = ball_x if expand_right else ball_x + self.compact_size - width
         y = ball_y if expand_down else ball_y + self.compact_size - height
-        x = max(8, min(x, max(8, screen_width - width - 8)))
-        y = max(8, min(y, max(8, work_height - height - 8)))
-        return int(x), int(y)
+        return (int(max(8, min(x, max(8, screen_width - width - 8)))),
+                int(max(8, min(y, max(8, work_height - height - 8)))))
 
     def expand(self):
         self.single_click_id = None
@@ -611,37 +647,42 @@ class FloatingBall(tk.Toplevel):
             return
         items = self.db.items(monday_for(date.today()))
         screen_width, work_height = self.work_area()
-        width = min(340, max(280, screen_width - 16))
-        desired_height = 162 + max(1, len(items)) * 47
-        height = min(max(220, desired_height), max(220, work_height - 16))
+        width = min(370, max(300, screen_width - 16))
+        height = min(max(250, 194 + max(1, len(items)) * 53), max(250, work_height - 16))
         x, y = self.expanded_geometry(width, height)
-
         self.expanded = True
         self.geometry(f"{width}x{height}+{x}+{y}")
-        self.configure(bg=BG)
+        self.configure(bg=CARD)
         self.ball.pack_forget()
-        self.expanded_frame = tk.Frame(self, bg=BG, padx=18, pady=16)
+        self.expanded_frame = tk.Frame(self, bg=CARD, padx=18, pady=16)
         self.expanded_frame.pack(fill="both", expand=True)
-        head = tk.Frame(self.expanded_frame, bg=BG)
-        head.pack(fill="x")
-        tk.Label(head, text="本周待办", bg=BG, fg=INK, font=(FONT, 15, "bold")).pack(side="left")
-        tk.Button(head, text="编辑", command=self.restore, relief="flat", bd=0, bg=ACCENT, fg="white",
-                  activebackground=ACCENT, font=(FONT, 9), padx=10, cursor="hand2").pack(side="right")
-        tk.Label(self.expanded_frame, text="移出面板自动收起；双击悬浮球可直接编辑", bg=BG, fg=MUTED, font=(FONT, 9)).pack(anchor="w", pady=(3, 9))
-        self.footer = tk.Label(self.expanded_frame, text="", bg=BG, fg=MUTED, font=(FONT, 9), anchor="w")
-        self.footer.pack(fill="x", side="bottom", pady=(8, 0))
 
-        list_holder = tk.Frame(self.expanded_frame, bg=BG)
-        list_holder.pack(fill="both", expand=True)
-        self.items_canvas = tk.Canvas(list_holder, bg=BG, highlightthickness=0)
-        self.items_scroll = ttk.Scrollbar(list_holder, orient="vertical", command=self.items_canvas.yview)
-        self.items_frame = tk.Frame(self.items_canvas, bg=BG)
+        header = tk.Frame(self.expanded_frame, bg=CARD)
+        header.pack(fill="x")
+        left = tk.Frame(header, bg=CARD)
+        left.pack(side="left", fill="x", expand=True)
+        tk.Label(left, text="本周待办", bg=CARD, fg=INK, font=(FONT, 15, "bold")).pack(anchor="w")
+        self.float_status = tk.Label(left, text="", bg=ACCENT_LIGHT, fg=ACCENT, font=(FONT, 8, "bold"), padx=8, pady=3)
+        self.float_status.pack(anchor="w", pady=(5, 0))
+        PillButton(header, "收起", self.collapse, width=54, height=30, surface=CARD, font=(FONT, 8)).pack(side="right", padx=(7, 0))
+        PillButton(header, "编辑", self.restore, width=54, height=30, primary=True, surface=CARD, font=(FONT, 8)).pack(side="right")
+        tk.Label(self.expanded_frame, text="点击圆圈即可标记完成，所有任务仅保存在本机",
+                 bg=CARD, fg=MUTED, font=(FONT, 8)).pack(anchor="w", pady=(12, 10))
+        tk.Frame(self.expanded_frame, bg=BORDER, height=1).pack(fill="x", pady=(0, 10))
+
+        holder = tk.Frame(self.expanded_frame, bg=CARD)
+        holder.pack(fill="both", expand=True)
+        self.items_canvas = tk.Canvas(holder, bg=CARD, highlightthickness=0)
+        self.items_scroll = ttk.Scrollbar(holder, orient="vertical", command=self.items_canvas.yview)
+        self.items_frame = tk.Frame(self.items_canvas, bg=CARD)
         self.items_window_id = self.items_canvas.create_window((0, 0), window=self.items_frame, anchor="nw")
         self.items_frame.bind("<Configure>", lambda _e: self.items_canvas.configure(scrollregion=self.items_canvas.bbox("all")))
         self.items_canvas.bind("<Configure>", lambda event: self.items_canvas.itemconfigure(self.items_window_id, width=event.width))
         self.items_canvas.configure(yscrollcommand=self.items_scroll.set)
         self.items_canvas.pack(side="left", fill="both", expand=True)
         self.items_scroll.pack(side="right", fill="y")
+        self.footer = tk.Label(self.expanded_frame, text="", bg=SUBTLE, fg=MUTED, font=(FONT, 8), anchor="w", padx=10, pady=6)
+        self.footer.pack(fill="x", side="bottom", pady=(10, 0))
         self.refresh_expanded()
 
     def refresh_ball(self):
@@ -654,11 +695,14 @@ class FloatingBall(tk.Toplevel):
         for child in self.items_frame.winfo_children():
             child.destroy()
         items = self.db.items(monday_for(date.today()))
+        pending = sum(1 for row in items if not row["completed"])
+        self.float_status.configure(text=f"未完成 {pending} 项")
         for item in items:
-            FloatingTodoRow(self.items_frame, item, self.set_float_done).pack(fill="x", pady=(0, 5))
+            FloatingTodoRow(self.items_frame, item, self.set_float_done).pack(fill="x", pady=(0, 7))
         if not items:
-            tk.Label(self.items_frame, text="暂无待办", bg=BG, fg=MUTED, font=(FONT, 10)).pack(anchor="w", pady=10)
-        self.footer.configure(text=f"未完成 {sum(1 for row in items if not row['completed'])} 项 · 数据保存在本机")
+            tk.Label(self.items_frame, text="暂无待办，去编辑页添加一项吧", bg=CARD, fg=MUTED,
+                     font=(FONT, 10), pady=20).pack(fill="x")
+        self.footer.configure(text=f"本周共 {len(items)} 项  ·  已完成 {len(items) - pending} 项")
 
     def set_float_done(self, item_id, value):
         self.db.set_completed(item_id, value)
@@ -666,11 +710,9 @@ class FloatingBall(tk.Toplevel):
 
     def monitor(self):
         if self.winfo_exists():
-            if self.expanded:
-                x, y = self.winfo_pointerxy()
-                if not (self.winfo_rootx() <= x <= self.winfo_rootx() + self.winfo_width() and self.winfo_rooty() <= y <= self.winfo_rooty() + self.winfo_height()):
-                    self.collapse()
-            self.monitor_id = self.after(180, self.monitor)
+            if not self.expanded:
+                self.refresh_ball()
+            self.monitor_id = self.after(3000, self.monitor)
 
     def collapse(self):
         if not self.expanded:
@@ -678,7 +720,8 @@ class FloatingBall(tk.Toplevel):
         self.expanded = False
         if self.expanded_frame:
             self.expanded_frame.destroy()
-        self.configure(bg=ACCENT)
+            self.expanded_frame = None
+        self.configure(bg=FLOAT_TRANSPARENT)
         self.ball.pack()
         self.position_compact()
 
@@ -698,7 +741,6 @@ class FloatingBall(tk.Toplevel):
             pass
         self.cancel_single_click()
         super().destroy()
-
 
 class WeeklyTodoApp(tk.Tk):
     def __init__(self):
@@ -724,33 +766,58 @@ class WeeklyTodoApp(tk.Tk):
                          font=(FONT, 10), cursor="hand2")
 
     def build(self):
-        outer = tk.Frame(self, bg=BG, padx=26, pady=22)
+        outer = tk.Frame(self, bg=BG, padx=28, pady=24)
         outer.pack(fill="both", expand=True)
-        footer = tk.Frame(outer, bg=BG, height=50)
-        footer.pack(side="bottom", fill="x")
+
+        footer = tk.Frame(outer, bg=BG, height=48)
+        footer.pack(side="bottom", fill="x", pady=(14, 0))
         footer.pack_propagate(False)
         self.summary = tk.Label(footer, bg=BG, fg=MUTED, font=(FONT, 9), anchor="w")
         self.summary.pack(side="left", pady=8)
-        history_btn = PillButton(footer, "记录查询", self.show_history, width=92, surface=BG)
-        history_btn.pack(side="right", pady=2)
-        export_btn = PillButton(footer, "导出本周", self.export_week, width=92, surface=BG)
-        export_btn.pack(side="right", padx=(0, 10), pady=2)
+        PillButton(footer, "记录查询", self.show_history, width=94, height=36, surface=BG).pack(side="right", pady=2)
+        PillButton(footer, "导出本周", self.export_week, width=94, height=36, surface=BG).pack(side="right", padx=(0, 10), pady=2)
 
-        input_frame = tk.Frame(outer, bg=BG, height=52)
-        input_frame.pack(side="top", fill="x", pady=(10, 10))
+        header = tk.Frame(outer, bg=BG, height=88)
+        header.pack(side="top", fill="x")
+        header.pack_propagate(False)
+        titles = tk.Frame(header, bg=BG)
+        titles.pack(side="left", fill="y")
+        tk.Label(titles, text="每周待办", bg=BG, fg=INK, font=(FONT, 23, "bold")).pack(anchor="w")
+        tk.Label(titles, text="把重要的事，一件件完成", bg=BG, fg=MUTED, font=(FONT, 9)).pack(anchor="w", pady=(4, 0))
+        nav = tk.Frame(header, bg=BG)
+        nav.pack(side="right", anchor="n", pady=(3, 0))
+        PillButton(nav, "日历", self.open_calendar, width=60, height=34, surface=BG, font=(FONT, 9)).pack(side="left", padx=(0, 7))
+        PillButton(nav, "‹", lambda: self.change_week(-7), width=36, height=34, surface=BG, font=("Segoe UI", 16)).pack(side="left", padx=(0, 7))
+        PillButton(nav, "›", lambda: self.change_week(7), width=36, height=34, surface=BG, font=("Segoe UI", 16)).pack(side="left", padx=(0, 7))
+        PillButton(nav, "回到本周", self.go_today, width=78, height=34, surface=BG, font=(FONT, 8)).pack(side="left")
+        self.week_label = tk.Label(header, text="", bg=ACCENT_LIGHT, fg=ACCENT, font=(FONT, 9, "bold"), padx=10, pady=5, cursor="hand2")
+        self.week_label.pack(side="left", anchor="sw", padx=(18, 0), pady=(0, 2))
+        self.week_label.bind("<Button-1>", lambda _e: self.open_calendar())
+
+        input_frame = tk.Frame(outer, bg=BG, height=50)
+        input_frame.pack(side="top", fill="x", pady=(12, 12))
+        input_frame.pack_propagate(False)
+        input_card = tk.Frame(input_frame, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        input_card.pack(side="left", fill="both", expand=True)
         self.input_var = tk.StringVar()
-        self.input = tk.Entry(input_frame, textvariable=self.input_var, font=(FONT, 10), relief="flat", bd=0,
-                              bg=CARD, fg=INK, insertbackground=INK, highlightthickness=1, highlightbackground=BORDER,
-                              highlightcolor=ACCENT)
-        self.input.pack(side="left", fill="x", expand=True, ipady=9)
+        self.input = tk.Entry(input_card, textvariable=self.input_var, font=(FONT, 10), relief="flat", bd=0,
+                              bg=CARD, fg=INK, insertbackground=INK, highlightthickness=0)
+        self.input.pack(fill="both", expand=True, padx=14, pady=7)
         self.input.bind("<Return>", lambda _e: self.add_item())
-        add_btn = PillButton(input_frame, "添加", self.add_item, width=76, height=38, primary=True, surface=BG)
-        add_btn.pack(side="left", padx=(10, 0))
+        PillButton(input_frame, "添加", self.add_item, width=78, height=40, primary=True, surface=BG).pack(side="left", padx=(10, 0))
 
-        self.list_card = tk.Frame(outer, bg=CARD, padx=18, pady=16, highlightbackground=BORDER, highlightthickness=1)
+        self.list_card = tk.Frame(outer, bg=CARD, padx=16, pady=14, highlightbackground=BORDER, highlightthickness=1)
         self.list_card.pack(side="top", fill="both", expand=True)
-        self.list_canvas = tk.Canvas(self.list_card, bg=CARD, highlightthickness=0)
-        self.scroll = ttk.Scrollbar(self.list_card, orient="vertical", command=self.list_canvas.yview)
+        list_head = tk.Frame(self.list_card, bg=CARD, height=30)
+        list_head.pack(fill="x", pady=(0, 8))
+        list_head.pack_propagate(False)
+        tk.Label(list_head, text="本周清单", bg=CARD, fg=INK, font=(FONT, 11, "bold")).pack(side="left")
+        tk.Label(list_head, text="双击待办可快速编辑", bg=CARD, fg=MUTED, font=(FONT, 8)).pack(side="right", pady=(3, 0))
+        tk.Frame(self.list_card, bg=BORDER, height=1).pack(fill="x", pady=(0, 7))
+        holder = tk.Frame(self.list_card, bg=CARD)
+        holder.pack(fill="both", expand=True)
+        self.list_canvas = tk.Canvas(holder, bg=CARD, highlightthickness=0)
+        self.scroll = ttk.Scrollbar(holder, orient="vertical", command=self.list_canvas.yview)
         self.rows_frame = tk.Frame(self.list_canvas, bg=CARD)
         self.rows_frame.bind("<Configure>", lambda _e: self.list_canvas.configure(scrollregion=self.list_canvas.bbox("all")))
         self.list_canvas.create_window((0, 0), window=self.rows_frame, anchor="nw")
@@ -758,26 +825,6 @@ class WeeklyTodoApp(tk.Tk):
         self.list_canvas.pack(side="left", fill="both", expand=True)
         self.scroll.pack(side="right", fill="y")
         self.list_canvas.bind("<Configure>", lambda e: self.list_canvas.itemconfigure(1, width=e.width))
-
-        header = tk.Frame(outer, bg=BG, height=72)
-        header.pack(side="top", fill="x")
-        tk.Label(header, text="本周待办", bg=BG, fg=INK, font=(FONT, 22, "bold")).pack(anchor="w")
-        self.week_label = tk.Label(header, text="", bg=BG, fg=MUTED, font=(FONT, 10))
-        self.week_label.pack(anchor="w", pady=(3, 0))
-        self.week_label.bind("<Button-1>", lambda _e: self.open_calendar())
-        self.week_label.configure(cursor="hand2")
-        nav = tk.Frame(header, bg=BG)
-        nav.place(relx=1, rely=0, anchor="ne")
-        calendar_btn = PillButton(nav, "日历", self.open_calendar, width=58, surface=BG)
-        calendar_btn.pack(side="left", padx=(0, 7))
-        for text, command, width, pixels in (("‹", lambda: self.change_week(-7), 3, 34), ("›", lambda: self.change_week(7), 3, 34), ("回到本周", self.go_today, 8, 78)):
-            btn = PillButton(nav, text, command, width=pixels, surface=BG,
-                             font=("Segoe UI", 13) if text in ("‹", "›") else (FONT, 9))
-            btn.pack(side="left", padx=(0, 7))
-        # Header was created after the content cards so it is explicitly moved
-        # to the top of the pack order.
-        header.pack_forget()
-        header.pack(side="top", fill="x", before=input_frame)
 
     def add_item(self):
         title = self.input_var.get().strip()
