@@ -78,7 +78,8 @@ class TodoDatabase:
                 title TEXT NOT NULL,
                 completed INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
-                completed_at TEXT
+                completed_at TEXT,
+                source_todo_id INTEGER REFERENCES todos(id)
             );
             CREATE INDEX IF NOT EXISTS idx_todos_week ON todos(week_id);
             CREATE TABLE IF NOT EXISTS carry_forwards (
@@ -89,6 +90,11 @@ class TodoDatabase:
             );
             """
         )
+        # Upgrade databases created by older versions without touching existing rows.
+        todo_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(todos)")}
+        if "source_todo_id" not in todo_columns:
+            self.conn.execute("ALTER TABLE todos ADD COLUMN source_todo_id INTEGER")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_source ON todos(source_todo_id)")
         self.conn.commit()
 
     def ensure_week(self, start: date) -> int:
@@ -105,33 +111,53 @@ class TodoDatabase:
         return week_id
 
     def carry_forward_if_needed(self, target_start: date, target_week_id: int):
-        """Copy only unfinished tasks from the immediately preceding week once."""
-        already_processed = self.conn.execute(
-            "SELECT 1 FROM carry_forwards WHERE target_week_id=?", (target_week_id,)
-        ).fetchone()
-        if already_processed:
-            return
+        """Synchronize unfinished tasks from the immediately preceding week.
 
+        This intentionally runs on every access. Older builds could create a target
+        week before its source tasks were added, so a permanent per-week early-exit
+        marker would leave those tasks stranded forever.
+        """
         previous_key = (target_start - timedelta(days=7)).isoformat()
         previous_week = self.conn.execute(
             "SELECT id FROM weeks WHERE week_start=?", (previous_key,)
         ).fetchone()
-        if previous_week:
-            created_at = datetime.now().isoformat(timespec="seconds")
-            self.conn.execute(
+        if not previous_week:
+            return
+
+        source_week_id = int(previous_week["id"])
+        source_items = self.conn.execute(
+            "SELECT id,title FROM todos WHERE week_id=? AND completed=0 ORDER BY id ASC",
+            (source_week_id,),
+        ).fetchall()
+        created_at = datetime.now().isoformat(timespec="seconds")
+        for source in source_items:
+            # source_todo_id gives exact de-duplication for new copies. The title
+            # fallback keeps databases created before this column from duplicating
+            # tasks that were already carried forward by the old implementation.
+            exists = self.conn.execute(
                 """
-                INSERT INTO todos(week_id,title,completed,created_at)
-                SELECT ?, title, 0, ?
-                FROM todos
-                WHERE week_id=? AND completed=0
+                SELECT 1 FROM todos
+                WHERE week_id=? AND (source_todo_id=? OR (source_todo_id IS NULL AND title=?))
+                LIMIT 1
                 """,
-                (target_week_id, created_at, int(previous_week["id"])),
+                (target_week_id, int(source["id"]), source["title"]),
+            ).fetchone()
+            if exists:
+                continue
+            self.conn.execute(
+                "INSERT INTO todos(week_id,title,completed,created_at,source_todo_id) VALUES (?,?,?,?,?)",
+                (target_week_id, source["title"], 0, created_at, int(source["id"])),
             )
+
+        marker = self.conn.execute(
+            "SELECT 1 FROM carry_forwards WHERE target_week_id=?", (target_week_id,)
+        ).fetchone()
+        if not marker:
             self.conn.execute(
                 "INSERT INTO carry_forwards(source_week_id,target_week_id,created_at) VALUES (?,?,?)",
-                (int(previous_week["id"]), target_week_id, created_at),
+                (source_week_id, target_week_id, created_at),
             )
-            self.conn.commit()
+        self.conn.commit()
 
     def items(self, start: date):
         week_id = self.ensure_week(start)
@@ -754,7 +780,9 @@ class WeeklyTodoApp(tk.Tk):
         self.geometry("860x650")
         self.minsize(700, 500)
         self.configure(bg=BG)
-        self.protocol("WM_DELETE_WINDOW", self.close_app)
+        # The title-bar close action is a minimize-to-ball action. The explicit
+        # application shutdown remains available through the normal process exit.
+        self.protocol("WM_DELETE_WINDOW", self.enter_float)
         self.bind("<Unmap>", self.on_window_unmap)
         self.build()
         self.refresh()
