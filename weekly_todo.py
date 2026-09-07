@@ -95,7 +95,37 @@ class TodoDatabase:
         if "source_todo_id" not in todo_columns:
             self.conn.execute("ALTER TABLE todos ADD COLUMN source_todo_id INTEGER")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_source ON todos(source_todo_id)")
+        self.migrate_legacy_lineage()
         self.conn.commit()
+
+    def migrate_legacy_lineage(self):
+        """Annotate copies made by pre-lineage builds without changing task text.
+
+        Older databases already contain carry-forward records but no source item
+        id. Matching each recorded source task to the same-title target task lets
+        the new one-week rule stop historical copies from hopping forward again.
+        """
+        pairs = self.conn.execute(
+            "SELECT source_week_id,target_week_id FROM carry_forwards ORDER BY target_week_id"
+        ).fetchall()
+        for pair in pairs:
+            sources = self.conn.execute(
+                "SELECT id,title FROM todos WHERE week_id=? ORDER BY id", (int(pair["source_week_id"]),)
+            ).fetchall()
+            for source in sources:
+                target = self.conn.execute(
+                    """
+                    SELECT id FROM todos
+                    WHERE week_id=? AND title=? AND source_todo_id IS NULL
+                    ORDER BY id LIMIT 1
+                    """,
+                    (int(pair["target_week_id"]), source["title"]),
+                ).fetchone()
+                if target:
+                    self.conn.execute(
+                        "UPDATE todos SET source_todo_id=? WHERE id=?",
+                        (int(source["id"]), int(target["id"])),
+                    )
 
     def ensure_week(self, start: date) -> int:
         key = start.isoformat()
@@ -126,14 +156,17 @@ class TodoDatabase:
 
         source_week_id = int(previous_week["id"])
         source_items = self.conn.execute(
-            "SELECT id,title FROM todos WHERE week_id=? AND completed=0 ORDER BY id ASC",
+            "SELECT id,title,source_todo_id FROM todos WHERE week_id=? AND completed=0 ORDER BY id ASC",
             (source_week_id,),
         ).fetchall()
         created_at = datetime.now().isoformat(timespec="seconds")
         for source in source_items:
-            # source_todo_id gives exact de-duplication for new copies. The title
-            # fallback keeps databases created before this column from duplicating
-            # tasks that were already carried forward by the old implementation.
+            # Only tasks created directly in the previous week may move forward.
+            # An inherited task must stop here instead of hopping across weeks.
+            if source["source_todo_id"] is not None:
+                continue
+            # The title fallback keeps databases created before this column from
+            # duplicating tasks that were already carried forward by the old build.
             exists = self.conn.execute(
                 """
                 SELECT 1 FROM todos
