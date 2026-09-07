@@ -95,102 +95,17 @@ class TodoDatabase:
         if "source_todo_id" not in todo_columns:
             self.conn.execute("ALTER TABLE todos ADD COLUMN source_todo_id INTEGER")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_source ON todos(source_todo_id)")
-        self.migrate_legacy_lineage()
         self.conn.commit()
-
-    def migrate_legacy_lineage(self):
-        """Annotate copies made by pre-lineage builds without changing task text.
-
-        Older databases already contain carry-forward records but no source item
-        id. Matching each recorded source task to the same-title target task lets
-        the new one-week rule stop historical copies from hopping forward again.
-        """
-        pairs = self.conn.execute(
-            "SELECT source_week_id,target_week_id FROM carry_forwards ORDER BY target_week_id"
-        ).fetchall()
-        for pair in pairs:
-            sources = self.conn.execute(
-                "SELECT id,title FROM todos WHERE week_id=? ORDER BY id", (int(pair["source_week_id"]),)
-            ).fetchall()
-            for source in sources:
-                target = self.conn.execute(
-                    """
-                    SELECT id FROM todos
-                    WHERE week_id=? AND title=? AND source_todo_id IS NULL
-                    ORDER BY id LIMIT 1
-                    """,
-                    (int(pair["target_week_id"]), source["title"]),
-                ).fetchone()
-                if target:
-                    self.conn.execute(
-                        "UPDATE todos SET source_todo_id=? WHERE id=?",
-                        (int(source["id"]), int(target["id"])),
-                    )
 
     def ensure_week(self, start: date) -> int:
         key = start.isoformat()
         row = self.conn.execute("SELECT id FROM weeks WHERE week_start=?", (key,)).fetchone()
         if row:
-            week_id = int(row["id"])
-            self.carry_forward_if_needed(start, week_id)
-            return week_id
+            return int(row["id"])
         cur = self.conn.execute("INSERT INTO weeks(week_start) VALUES (?)", (key,))
         week_id = int(cur.lastrowid)
-        self.carry_forward_if_needed(start, week_id)
         self.conn.commit()
         return week_id
-
-    def carry_forward_if_needed(self, target_start: date, target_week_id: int):
-        """Synchronize unfinished tasks from the immediately preceding week.
-
-        This intentionally runs on every access. Older builds could create a target
-        week before its source tasks were added, so a permanent per-week early-exit
-        marker would leave those tasks stranded forever.
-        """
-        previous_key = (target_start - timedelta(days=7)).isoformat()
-        previous_week = self.conn.execute(
-            "SELECT id FROM weeks WHERE week_start=?", (previous_key,)
-        ).fetchone()
-        if not previous_week:
-            return
-
-        source_week_id = int(previous_week["id"])
-        source_items = self.conn.execute(
-            "SELECT id,title,source_todo_id FROM todos WHERE week_id=? AND completed=0 ORDER BY id ASC",
-            (source_week_id,),
-        ).fetchall()
-        created_at = datetime.now().isoformat(timespec="seconds")
-        for source in source_items:
-            # Only tasks created directly in the previous week may move forward.
-            # An inherited task must stop here instead of hopping across weeks.
-            if source["source_todo_id"] is not None:
-                continue
-            # The title fallback keeps databases created before this column from
-            # duplicating tasks that were already carried forward by the old build.
-            exists = self.conn.execute(
-                """
-                SELECT 1 FROM todos
-                WHERE week_id=? AND (source_todo_id=? OR (source_todo_id IS NULL AND title=?))
-                LIMIT 1
-                """,
-                (target_week_id, int(source["id"]), source["title"]),
-            ).fetchone()
-            if exists:
-                continue
-            self.conn.execute(
-                "INSERT INTO todos(week_id,title,completed,created_at,source_todo_id) VALUES (?,?,?,?,?)",
-                (target_week_id, source["title"], 0, created_at, int(source["id"])),
-            )
-
-        marker = self.conn.execute(
-            "SELECT 1 FROM carry_forwards WHERE target_week_id=?", (target_week_id,)
-        ).fetchone()
-        if not marker:
-            self.conn.execute(
-                "INSERT INTO carry_forwards(source_week_id,target_week_id,created_at) VALUES (?,?,?)",
-                (source_week_id, target_week_id, created_at),
-            )
-        self.conn.commit()
 
     def items(self, start: date):
         week_id = self.ensure_week(start)
