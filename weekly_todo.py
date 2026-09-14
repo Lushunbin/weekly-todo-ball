@@ -95,7 +95,27 @@ class TodoDatabase:
         if "source_todo_id" not in todo_columns:
             self.conn.execute("ALTER TABLE todos ADD COLUMN source_todo_id INTEGER")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_source ON todos(source_todo_id)")
+        self.remove_legacy_carried_tasks()
         self.conn.commit()
+
+    def remove_legacy_carried_tasks(self):
+        """Remove only old auto-copies from the current and future weeks.
+
+        Builds released before automatic carry-forward was disabled may already
+        have populated weeks months in advance. ``source_todo_id`` is written only
+        by that old copy operation, so manual tasks and past history stay intact.
+        """
+        current_week = monday_for(date.today()).isoformat()
+        self.conn.execute(
+            """
+            DELETE FROM todos
+            WHERE source_todo_id IS NOT NULL
+              AND week_id IN (
+                  SELECT id FROM weeks WHERE week_start >= ?
+              )
+            """,
+            (current_week,),
+        )
 
     def ensure_week(self, start: date) -> int:
         key = start.isoformat()
